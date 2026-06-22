@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/mount-utils"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/cloud"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/driver/internal"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/util"
@@ -213,8 +214,7 @@ func (d *nodeService) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 
 	klog.V(5).InfoS("NodeUnpublishVolume: unmounting", "target", target)
-	err := d.mounter.Unmount(target)
-	if err != nil {
+	if err := d.unmount(target); err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not unmount %q: %v", target, err)
 	}
 
@@ -261,6 +261,63 @@ func (d *nodeService) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest
 	return &csi.NodeGetInfoResponse{
 		NodeId: metadata.GetInstanceID(),
 	}, nil
+}
+
+// unmount performs an unmount of the given target path. If forcefulUnmountTimeout
+// is configured, it runs the unmount in a goroutine and polls IsLikelyNotMountPoint
+// every 5 seconds. If the mount point disappears before the process exits, it
+// returns success immediately (the kernel-level work is done even if the umount
+// process is still cleaning up). If the timeout elapses and the mount point is
+// still present, it retries with umount -f via UnmountWithForce.
+// When forcefulUnmountTimeout is zero, it falls back to a plain blocking Unmount.
+func (d *nodeService) unmount(target string) error {
+	if d.driverOptions.forcefulUnmountTimeout == 0 {
+		return d.mounter.Unmount(target)
+	}
+
+	const pollInterval = 5 * time.Second
+
+	// Run the normal unmount in the background; it may hang.
+	done := make(chan error, 1)
+	go func() {
+		done <- d.mounter.Unmount(target)
+	}()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	timer := time.NewTimer(d.driverOptions.forcefulUnmountTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			// umount process exited on its own.
+			return err
+
+		case <-ticker.C:
+			// Check whether the mount point has already disappeared.
+			notMnt, err := d.mounter.IsLikelyNotMountPoint(target)
+			if err == nil && notMnt {
+				// Kernel-level unmount is complete. The umount process may still
+				// be hanging in userspace cleanup, but the work is done — it is
+				// safe to release the lock now.
+				klog.V(4).InfoS("NodeUnpublishVolume: mount point gone before umount process exited, treating as success", "target", target)
+				return nil
+			}
+
+		case <-timer.C:
+			// Timeout elapsed and mount point is still present. Fall back to
+			// umount -f to force the unmount.
+			klog.InfoS("NodeUnpublishVolume: unmount timed out, retrying with forced unmount", "target", target, "timeout", d.driverOptions.forcefulUnmountTimeout)
+			forceUnmounter, ok := d.mounter.(mount.MounterForceUnmounter)
+			if !ok {
+				return fmt.Errorf("unmount of %q timed out after %v and mounter does not support forced unmount", target, d.driverOptions.forcefulUnmountTimeout)
+			}
+			// UnmountWithForce uses exec.CommandContext internally so it will
+			// not block indefinitely.
+			return forceUnmounter.UnmountWithForce(target, d.driverOptions.forcefulUnmountTimeout)
+		}
+	}
 }
 
 // isMounted checks if target is mounted. It does NOT return an error if target

@@ -18,16 +18,17 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
+
 	flag "github.com/spf13/pflag"
 	"k8s.io/component-base/featuregate"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
-	"os"
 	"sigs.k8s.io/aws-fsx-csi-driver/cmd/hooks"
 	"sigs.k8s.io/aws-fsx-csi-driver/cmd/options"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/cloud"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/driver"
-	"strings"
 )
 
 // Options is the combined set of options for all operating modes.
@@ -106,6 +107,11 @@ func GetOptions(fs *flag.FlagSet) *Options {
 
 	if err := fs.Parse(args); err != nil {
 		panic(err)
+	}
+
+	if err := nodeOptions.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid node option: %v\n", err)
+		os.Exit(1)
 	}
 
 	err = logsapi.ValidateAndApply(c, featureGate)

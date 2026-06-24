@@ -17,15 +17,31 @@ limitations under the License.
 package driver
 
 import (
+	"time"
+
 	"k8s.io/mount-utils"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/cloud"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/driver/internal"
 )
 
+// fakeForceMounter adds UnmountWithForce to mount.FakeMounter, which does not
+// implement mount.MounterForceUnmounter upstream. Without it, NodeMounter's
+// delegating UnmountWithForce would always fail the type assertion in tests and
+// the forced-unmount path would be untestable.
+type fakeForceMounter struct {
+	*mount.FakeMounter
+}
+
+func (m *fakeForceMounter) UnmountWithForce(target string, _ time.Duration) error {
+	return m.Unmount(target)
+}
+
 func NewFakeMounter() Mounter {
 	return &NodeMounter{
-		Interface: &mount.FakeMounter{
-			MountPoints: []mount.MountPoint{},
+		Interface: &fakeForceMounter{
+			FakeMounter: &mount.FakeMounter{
+				MountPoints: []mount.MountPoint{},
+			},
 		},
 	}
 }
@@ -47,7 +63,7 @@ func NewFakeDriver(endpoint string) *Driver {
 		nodeService: nodeService{
 			mounter:       NewFakeMounter(),
 			inFlight:      internal.NewInFlight(),
-			driverOptions: &DriverOptions{},
+			driverOptions: &DriverOptions{forcefulUnmountTimeout: -1},
 		},
 	}
 	return driver

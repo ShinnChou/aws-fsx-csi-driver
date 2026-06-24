@@ -68,6 +68,12 @@ spec:
             - --endpoint=$(CSI_ENDPOINT)
             - --logging-format={{ .Values.node.loggingFormat }}
             - --v={{ .Values.node.logLevel }}
+            {{- with .Values.node.forcefulUnmountTimeout }}
+            - --forceful-unmount-timeout={{ . }}
+            {{- end }}
+            {{- with .Values.node.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             - name: CSI_ENDPOINT
               value: unix:/csi/csi.sock

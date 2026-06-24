@@ -17,23 +17,41 @@ limitations under the License.
 package options
 
 import (
+	"fmt"
 	"time"
 
 	flag "github.com/spf13/pflag"
 )
 
+// minForcefulUnmountTimeout is the smallest positive --forceful-unmount-timeout
+// accepted. A normal unmount of a busy network filesystem can legitimately take
+// tens of seconds, and escalating to umount -f before it has had a fair chance
+// risks tearing down a mount that was about to come down cleanly.
+const minForcefulUnmountTimeout = 30 * time.Second
+
 // NodeOptions contains options and configuration settings for the node service.
 type NodeOptions struct {
 	// ForcefulUnmountTimeout is the duration after which a hanging unmount will be
 	// retried with umount -f, while periodically checking if the mount point has
-	// already disappeared. Set to 0 to disable (default, preserves existing behavior).
+	// already disappeared. Negative disables the feature (default, preserves
+	// existing behavior); 0 skips the normal unmount entirely.
 	ForcefulUnmountTimeout time.Duration
 }
 
 func (o *NodeOptions) AddFlags(fs *flag.FlagSet) {
-	fs.DurationVar(&o.ForcefulUnmountTimeout, "forceful-unmount-timeout", 0,
-		"Duration to wait for a normal unmount before retrying with umount -f. "+
-			"During this period the mount point is polled every 5s; if it disappears "+
-			"the lock is released immediately even if the umount process has not exited. "+
-			"Set to 0 to disable (default).")
+	fs.DurationVar(&o.ForcefulUnmountTimeout, "forceful-unmount-timeout", -1,
+		"Controls forced unmount behavior. "+
+			"Set to a positive duration (at least 30s, e.g. 2m) to wait that long "+
+			"for a normal unmount before escalating to umount -f. "+
+			"Set to 0 to call umount -f directly (skip normal unmount). "+
+			"Set to a negative duration to disable forced unmount entirely (default).")
+}
+
+// Validate checks that NodeOptions values are within acceptable bounds.
+func (o *NodeOptions) Validate() error {
+	if o.ForcefulUnmountTimeout > 0 && o.ForcefulUnmountTimeout < minForcefulUnmountTimeout {
+		return fmt.Errorf("--forceful-unmount-timeout must be at least %v if positive (use 0 to force unmount immediately, or a negative value to disable), got %v",
+			minForcefulUnmountTimeout, o.ForcefulUnmountTimeout)
+	}
+	return nil
 }

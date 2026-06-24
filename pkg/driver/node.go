@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/mount-utils"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/cloud"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/driver/internal"
 	"sigs.k8s.io/aws-fsx-csi-driver/pkg/util"
@@ -263,19 +262,44 @@ func (d *nodeService) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest
 	}, nil
 }
 
-// unmount performs an unmount of the given target path. If forcefulUnmountTimeout
-// is configured, it runs the unmount in a goroutine and polls IsLikelyNotMountPoint
-// every 5 seconds. If the mount point disappears before the process exits, it
-// returns success immediately (the kernel-level work is done even if the umount
-// process is still cleaning up). If the timeout elapses and the mount point is
-// still present, it retries with umount -f via UnmountWithForce.
-// When forcefulUnmountTimeout is zero, it falls back to a plain blocking Unmount.
+// unmountPollInterval is how often unmount re-checks whether the target stopped
+// being a mount point while a normal unmount is still in flight. The umount(8)
+// child can block in the kernel long after the filesystem has actually been
+// detached, so polling is what lets us release the per-volume in-flight lock
+// instead of waiting on a process that may never exit.
+//
+// A var rather than a const so tests can shorten it.
+var unmountPollInterval = 5 * time.Second
+
+// unmount performs an unmount of the given target path.
+//   - forcefulUnmountTimeout == 0: skip normal unmount entirely and run umount -f
+//     directly. Use this to verify that force unmount works end-to-end.
+//   - forcefulUnmountTimeout > 0: run normal unmount in a goroutine, poll to see
+//     if the mount point disappeared, and escalate to umount -f if the timeout
+//     elapses.
+//   - forcefulUnmountTimeout < 0 (feature disabled): plain blocking Unmount.
+//
+// Every path is bounded: unmount never blocks its caller on a syscall that has
+// no timeout, because the caller holds the per-volume in-flight lock and a
+// permanent block there wedges the volume for the lifetime of the driver pod.
 func (d *nodeService) unmount(target string) error {
-	if d.driverOptions.forcefulUnmountTimeout == 0 {
+	timeout := d.driverOptions.forcefulUnmountTimeout
+
+	if timeout < 0 {
 		return d.mounter.Unmount(target)
 	}
 
-	const pollInterval = 5 * time.Second
+	if timeout == 0 {
+		klog.InfoS("NodeUnpublishVolume: forceful-unmount-timeout=0, going straight to forced unmount", "target", target)
+		// A zero umountTimeout makes UnmountWithForce's internal normal-unmount
+		// attempt expire immediately, so it escalates straight to umount -f.
+		return d.forceUnmount(target, 0, unmountPollInterval)
+	}
+
+	// The mount point may already be gone; skip the goroutine and the wait.
+	if d.targetUnmounted(target) {
+		return nil
+	}
 
 	// Run the normal unmount in the background; it may hang.
 	done := make(chan error, 1)
@@ -283,40 +307,81 @@ func (d *nodeService) unmount(target string) error {
 		done <- d.mounter.Unmount(target)
 	}()
 
-	ticker := time.NewTicker(pollInterval)
+	ticker := time.NewTicker(unmountPollInterval)
 	defer ticker.Stop()
-	timer := time.NewTimer(d.driverOptions.forcefulUnmountTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	for {
 		select {
 		case err := <-done:
-			// umount process exited on its own.
 			return err
 
 		case <-ticker.C:
-			// Check whether the mount point has already disappeared.
-			notMnt, err := d.mounter.IsLikelyNotMountPoint(target)
-			if err == nil && notMnt {
-				// Kernel-level unmount is complete. The umount process may still
-				// be hanging in userspace cleanup, but the work is done — it is
-				// safe to release the lock now.
-				klog.V(4).InfoS("NodeUnpublishVolume: mount point gone before umount process exited, treating as success", "target", target)
+			if d.targetUnmounted(target) {
 				return nil
 			}
 
 		case <-timer.C:
-			// Timeout elapsed and mount point is still present. Fall back to
-			// umount -f to force the unmount.
-			klog.InfoS("NodeUnpublishVolume: unmount timed out, retrying with forced unmount", "target", target, "timeout", d.driverOptions.forcefulUnmountTimeout)
-			forceUnmounter, ok := d.mounter.(mount.MounterForceUnmounter)
-			if !ok {
-				return fmt.Errorf("unmount of %q timed out after %v and mounter does not support forced unmount", target, d.driverOptions.forcefulUnmountTimeout)
-			}
-			// UnmountWithForce uses exec.CommandContext internally so it will
-			// not block indefinitely.
-			return forceUnmounter.UnmountWithForce(target, d.driverOptions.forcefulUnmountTimeout)
+			klog.InfoS("NodeUnpublishVolume: unmount timed out, retrying with forced unmount", "target", target, "timeout", timeout)
+			return d.forceUnmount(target, timeout, timeout)
 		}
+	}
+}
+
+// targetUnmounted reports whether target has stopped being a mount point, either
+// because it was unmounted or because the directory itself is gone. A missing
+// target is success: kubelet removes the target directory after a successful
+// NodeUnpublishVolume, and some filesystems (Lustre among them) tear down the
+// mount namespace entry before the umount syscall returns.
+func (d *nodeService) targetUnmounted(target string) bool {
+	notMnt, err := d.mounter.IsLikelyNotMountPoint(target)
+	if err == nil && notMnt {
+		klog.V(4).InfoS("NodeUnpublishVolume: target is no longer a mount point, treating unmount as successful", "target", target)
+		return true
+	}
+	// IsLikelyNotMountPoint stats the path, so a vanished target surfaces as
+	// (true, ENOENT) rather than (true, nil). Log this louder than the plain
+	// case: the directory disappearing out from under us is unusual.
+	if os.IsNotExist(err) {
+		klog.InfoS("NodeUnpublishVolume: target path no longer exists, treating unmount as successful", "target", target)
+		return true
+	}
+	return false
+}
+
+// forceUnmount runs mounter.UnmountWithForce, which upstream implements with an
+// uninterruptible exec.Command("umount", "-f", ...) — no context, no deadline.
+// The whole point of this code path is that umount can block forever, so we run
+// it in its own goroutine and give up waiting after graceTimeout. The goroutine
+// (and its umount child) is deliberately left running: it may still succeed, and
+// abandoning it is what lets the caller release the per-volume lock so kubelet
+// can retry instead of the volume staying wedged.
+func (d *nodeService) forceUnmount(target string, umountTimeout, graceTimeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- d.mounter.UnmountWithForce(target, umountTimeout)
+	}()
+
+	timer := time.NewTimer(graceTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			klog.ErrorS(err, "NodeUnpublishVolume: forced unmount failed", "target", target)
+			return err
+		}
+		klog.InfoS("NodeUnpublishVolume: forced unmount succeeded", "target", target)
+		return nil
+
+	case <-timer.C:
+		// Check once more: the filesystem may be detached even though umount has
+		// not returned.
+		if d.targetUnmounted(target) {
+			return nil
+		}
+		return fmt.Errorf("forced unmount of %q did not complete within %v; abandoning it so the volume is not held indefinitely", target, graceTimeout)
 	}
 }
 
@@ -336,7 +401,11 @@ func (d *nodeService) isMounted(_ string, target string) (bool, error) {
 		_, pathErr := d.mounter.PathExists(target)
 		if pathErr != nil && d.mounter.IsCorruptedMnt(pathErr) {
 			klog.V(4).InfoS("NodePublishVolume: Target path is a corrupted mount. Trying to unmount.", "target", target)
-			if mntErr := d.mounter.Unmount(target); mntErr != nil {
+			// Go through d.unmount, not mounter.Unmount: this runs while the
+			// publish in-flight lock is held, so it needs the same timeout and
+			// forced-unmount escalation that NodeUnpublishVolume gets. A corrupted
+			// mount is exactly the case where a bare unmount is liable to hang.
+			if mntErr := d.unmount(target); mntErr != nil {
 				return false, status.Errorf(codes.Internal, "Unable to unmount the target %q : %v", target, mntErr)
 			}
 			//After successful unmount, the device is ready to be mounted.

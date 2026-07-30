@@ -104,6 +104,7 @@ spec:
             - --v=2
             - --leader-election=true
             - --timeout=5m
+            - --handle-volume-inuse-error=false
           env:
             - name: ADDRESS
               value: /var/lib/csi/sockets/pluginproxy/csi.sock

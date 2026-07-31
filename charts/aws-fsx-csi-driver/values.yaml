@@ -161,6 +161,21 @@ node:
   loggingFormat: text
   logLevel: 2
   kubeletPath: /var/lib/kubelet
+  # How long NodeUnpublishVolume waits for a normal unmount before escalating to
+  # `umount -f`. While waiting, the driver periodically checks whether the target
+  # has stopped being a mount point, so a umount(8) that blocks in the kernel
+  # after the filesystem is already detached no longer holds the volume's
+  # in-flight lock forever. Must be at least 30s. Set to 0 to skip the normal
+  # unmount and force immediately. Unset (the default) disables the feature and
+  # preserves the plain blocking unmount.
+  # ---
+  # forcefulUnmountTimeout: 2m
+  forcefulUnmountTimeout: ""
+  # Additional arguments passed to the fsx-plugin container.
+  # ---
+  # extraArgs:
+  #   - --forceful-unmount-timeout=2m
+  extraArgs: []
   nodeSelector: {}
   updateStrategy: {}
   #If you do want to specify resources, uncomment the following lines, adjust them as necessary,

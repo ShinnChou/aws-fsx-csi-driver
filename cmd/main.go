@@ -47,6 +47,7 @@ func main() {
 		driver.WithEndpoint(options.ServerOptions.Endpoint),
 		driver.WithMode(options.ServerOptions.DriverMode),
 		driver.WithExtraTags(options.ControllerOptions.ExtraTags),
+		driver.WithForcefulUnmountTimeout(options.NodeOptions.ForcefulUnmountTimeout),
 	)
 
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
@@ -53,9 +54,10 @@ type Driver struct {
 }
 
 type DriverOptions struct {
-	endpoint  string
-	mode      string
-	extraTags string
+	endpoint               string
+	mode                   string
+	extraTags              string
+	forcefulUnmountTimeout time.Duration
 }
 
 func NewDriver(options ...func(*DriverOptions)) (*Driver, error) {
@@ -149,5 +151,11 @@ func WithMode(mode string) func(*DriverOptions) {
 func WithExtraTags(extraTags string) func(*DriverOptions) {
 	return func(o *DriverOptions) {
 		o.extraTags = extraTags
+	}
+}
+
+func WithForcefulUnmountTimeout(timeout time.Duration) func(*DriverOptions) {
+	return func(o *DriverOptions) {
+		o.forcefulUnmountTimeout = timeout
 	}
 }

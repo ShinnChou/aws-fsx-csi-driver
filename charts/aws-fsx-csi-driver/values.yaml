@@ -14,7 +14,7 @@ sidecars:
   livenessProbe:
     image:
       repository: public.ecr.aws/csi-components/livenessprobe
-      tag: v2.18.0-eksbuild.3
+      tag: v2.19.0-eksbuild.3
       pullPolicy: IfNotPresent
     resources:
       requests:
@@ -28,7 +28,7 @@ sidecars:
   nodeDriverRegistrar:
     image:
       repository: public.ecr.aws/csi-components/csi-node-driver-registrar
-      tag: v2.16.0-eksbuild.3
+      tag: v2.17.0-eksbuild.3
       pullPolicy: IfNotPresent
     logLevel: 2
     resources:
@@ -43,7 +43,7 @@ sidecars:
   provisioner:
     image:
       repository: public.ecr.aws/csi-components/csi-provisioner
-      tag: v6.2.0-eksbuild.2
+      tag: v6.3.0-eksbuild.2
       pullPolicy: IfNotPresent
     logLevel: 2
     resources:
@@ -58,7 +58,7 @@ sidecars:
   resizer:
     image:
       repository: public.ecr.aws/csi-components/csi-resizer
-      tag: v2.1.0-eksbuild.3
+      tag: v2.2.1-eksbuild.1
       pullPolicy: IfNotPresent
     logLevel: 2
     resources:
@@ -76,6 +76,15 @@ controller:
   loggingFormat: text
   nodeSelector: {}
   replicaCount: 2
+  # enableMetrics enables the Prometheus metrics endpoint on the controller.
+  # When true, the driver exposes metrics on port 3301.
+  enableMetrics: false
+  # enablePrometheusAnnotations adds prometheus.io scrape annotations to the controller pod.
+  enablePrometheusAnnotations: true
+  # serviceMonitor controls creation of Prometheus Operator ServiceMonitor resources.
+  # Requires the Prometheus Operator CRDs to be installed.
+  serviceMonitor:
+    enabled: false
   #If you do want to specify resources, uncomment the following lines, adjust them as necessary
   resources:
     requests:
@@ -152,6 +161,21 @@ node:
   loggingFormat: text
   logLevel: 2
   kubeletPath: /var/lib/kubelet
+  # How long NodeUnpublishVolume waits for a normal unmount before escalating to
+  # `umount -f`. While waiting, the driver periodically checks whether the target
+  # has stopped being a mount point, so a umount(8) that blocks in the kernel
+  # after the filesystem is already detached no longer holds the volume's
+  # in-flight lock forever. Must be at least 30s. Set to 0 to skip the normal
+  # unmount and force immediately. Unset (the default) disables the feature and
+  # preserves the plain blocking unmount.
+  # ---
+  # forcefulUnmountTimeout: 2m
+  forcefulUnmountTimeout: ""
+  # Additional arguments passed to the fsx-plugin container.
+  # ---
+  # extraArgs:
+  #   - --forceful-unmount-timeout=2m
+  extraArgs: []
   nodeSelector: {}
   updateStrategy: {}
   #If you do want to specify resources, uncomment the following lines, adjust them as necessary,

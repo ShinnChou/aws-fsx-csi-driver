@@ -78,7 +78,7 @@ spec:
               cpu: 10m
               memory: 40Mi
         - name: csi-provisioner
-          image: public.ecr.aws/csi-components/csi-provisioner:v6.2.0-eksbuild.2
+          image: public.ecr.aws/csi-components/csi-provisioner:v6.3.0-eksbuild.2
           args:
             - --csi-address=$(ADDRESS)
             - --v=2
@@ -98,12 +98,13 @@ spec:
               cpu: 10m
               memory: 32Mi
         - name: csi-resizer
-          image: public.ecr.aws/csi-components/csi-resizer:v2.1.0-eksbuild.3
+          image: public.ecr.aws/csi-components/csi-resizer:v2.2.1-eksbuild.1
           args:
             - --csi-address=$(ADDRESS)
             - --v=2
             - --leader-election=true
             - --timeout=5m
+            - --handle-volume-inuse-error=false
           env:
             - name: ADDRESS
               value: /var/lib/csi/sockets/pluginproxy/csi.sock
@@ -117,7 +118,7 @@ spec:
               cpu: 10m
               memory: 32Mi
         - name: liveness-probe
-          image: public.ecr.aws/csi-components/livenessprobe:v2.18.0-eksbuild.3
+          image: public.ecr.aws/csi-components/livenessprobe:v2.19.0-eksbuild.3
           args:
             - --csi-address=/csi/csi.sock
             - --health-port=9910

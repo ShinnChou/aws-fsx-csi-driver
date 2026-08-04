@@ -11,6 +11,7 @@ package mocks
 
 import (
 	reflect "reflect"
+	time "time"
 
 	gomock "go.uber.org/mock/gomock"
 	mount "k8s.io/mount-utils"
@@ -225,4 +226,18 @@ func (m *MockMounter) Unmount(target string) error {
 func (mr *MockMounterMockRecorder) Unmount(target any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Unmount", reflect.TypeOf((*MockMounter)(nil).Unmount), target)
+}
+
+// UnmountWithForce mocks base method.
+func (m *MockMounter) UnmountWithForce(target string, umountTimeout time.Duration) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UnmountWithForce", target, umountTimeout)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UnmountWithForce indicates an expected call of UnmountWithForce.
+func (mr *MockMounterMockRecorder) UnmountWithForce(target, umountTimeout any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UnmountWithForce", reflect.TypeOf((*MockMounter)(nil).UnmountWithForce), target, umountTimeout)
 }

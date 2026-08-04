@@ -19,8 +19,10 @@ package driver
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
@@ -517,8 +519,9 @@ func TestNodeUnpublishVolume(t *testing.T) {
 				mockMounter := driverMocks.NewMockMounter(mockCtl)
 
 				driver := &nodeService{
-					mounter:  mockMounter,
-					inFlight: internal.NewInFlight(),
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: -1},
 				}
 
 				ctx := context.Background()
@@ -596,8 +599,9 @@ func TestNodeUnpublishVolume(t *testing.T) {
 				mockMounter := driverMocks.NewMockMounter(mockCtl)
 
 				driver := &nodeService{
-					mounter:  mockMounter,
-					inFlight: internal.NewInFlight(),
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: -1},
 				}
 
 				ctx := context.Background()
@@ -650,8 +654,9 @@ func TestNodeUnpublishVolume(t *testing.T) {
 				mockMounter := driverMocks.NewMockMounter(mockCtl)
 
 				awsDriver := &nodeService{
-					mounter:  mockMounter,
-					inFlight: internal.NewInFlight(),
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: -1},
 				}
 
 				ctx := context.Background()
@@ -669,6 +674,225 @@ func TestNodeUnpublishVolume(t *testing.T) {
 				_, err := awsDriver.NodeUnpublishVolume(ctx, req)
 				if err != nil {
 					t.Fatalf("NodeUnpublishVolume is failed: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, tc.testFunc)
+	}
+}
+
+// TestNodeUnpublishVolumeForcefulUnmount covers the forceful-unmount paths. The
+// bug being guarded against is a umount(8) that never returns: because
+// NodeUnpublishVolume holds a per-volume in-flight lock for its whole duration, a
+// permanently blocked unmount wedges the volume until the driver pod restarts. So
+// each case asserts the RPC *returns* rather than only what it returns.
+func TestNodeUnpublishVolumeForcefulUnmount(t *testing.T) {
+	const targetPath = "/target/path"
+
+	// Keep polling fast so the tests do not sit through real intervals.
+	origPollInterval := unmountPollInterval
+	unmountPollInterval = 10 * time.Millisecond
+	defer func() { unmountPollInterval = origPollInterval }()
+
+	// unpublish runs NodeUnpublishVolume and fails the test if it blocks, which is
+	// exactly the symptom customers hit.
+	unpublish := func(t *testing.T, driver *nodeService) error {
+		t.Helper()
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := driver.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+				VolumeId:   "volumeId",
+				TargetPath: targetPath,
+			})
+			errCh <- err
+		}()
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("NodeUnpublishVolume did not return; the in-flight lock would be held indefinitely")
+			return nil
+		}
+	}
+
+	testCases := []struct {
+		name     string
+		testFunc func(t *testing.T)
+	}{
+		{
+			// forceful-unmount-timeout=0 skips the normal unmount entirely.
+			name: "success: timeout zero forces unmount immediately",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				defer mockCtl.Finish()
+
+				mockMounter := driverMocks.NewMockMounter(mockCtl)
+				driver := &nodeService{
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: 0},
+				}
+
+				mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(false, nil)
+				mockMounter.EXPECT().UnmountWithForce(gomock.Eq(targetPath), gomock.Eq(time.Duration(0))).Return(nil)
+				// No plain Unmount: gomock fails the test if one is attempted.
+
+				if err := unpublish(t, driver); err != nil {
+					t.Fatalf("NodeUnpublishVolume failed: %v", err)
+				}
+			},
+		},
+		{
+			// The regression this whole change exists for: the normal unmount never
+			// returns, but the mount point is gone, so polling must notice and let the
+			// RPC finish instead of blocking on the stuck umount forever.
+			name: "success: hanging unmount released when mount point disappears",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				defer mockCtl.Finish()
+
+				mockMounter := driverMocks.NewMockMounter(mockCtl)
+				driver := &nodeService{
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: 10 * time.Second},
+				}
+
+				// Mounted at entry and on the first poll, unmounted on later polls.
+				gomock.InOrder(
+					mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(false, nil).Times(2),
+					mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(true, nil).MinTimes(1),
+				)
+				// Unmount never returns, mimicking a umount blocked in the kernel.
+				mockMounter.EXPECT().Unmount(gomock.Eq(targetPath)).DoAndReturn(func(string) error {
+					<-make(chan struct{})
+					return nil
+				})
+
+				if err := unpublish(t, driver); err != nil {
+					t.Fatalf("NodeUnpublishVolume failed: %v", err)
+				}
+			},
+		},
+		{
+			// IsLikelyNotMountPoint stats the path, so a target removed by kubelet (or
+			// by a filesystem that drops the namespace entry before umount returns)
+			// reports (true, ENOENT), not (true, nil). Treating that as still-mounted
+			// is what made the poll loop useless.
+			name: "success: hanging unmount released when target path vanishes",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				defer mockCtl.Finish()
+
+				mockMounter := driverMocks.NewMockMounter(mockCtl)
+				driver := &nodeService{
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: 10 * time.Second},
+				}
+
+				gomock.InOrder(
+					mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(false, nil).Times(2),
+					mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).
+						Return(true, os.ErrNotExist).MinTimes(1),
+				)
+				mockMounter.EXPECT().Unmount(gomock.Eq(targetPath)).DoAndReturn(func(string) error {
+					<-make(chan struct{})
+					return nil
+				})
+
+				if err := unpublish(t, driver); err != nil {
+					t.Fatalf("NodeUnpublishVolume failed: %v", err)
+				}
+			},
+		},
+		{
+			// Still mounted and unmount still stuck: escalate to umount -f.
+			name: "success: hanging unmount escalates to forced unmount",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				defer mockCtl.Finish()
+
+				mockMounter := driverMocks.NewMockMounter(mockCtl)
+				timeout := 50 * time.Millisecond
+				driver := &nodeService{
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: timeout},
+				}
+
+				mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(false, nil).AnyTimes()
+				mockMounter.EXPECT().Unmount(gomock.Eq(targetPath)).DoAndReturn(func(string) error {
+					<-make(chan struct{})
+					return nil
+				})
+				mockMounter.EXPECT().UnmountWithForce(gomock.Eq(targetPath), gomock.Eq(timeout)).Return(nil)
+
+				if err := unpublish(t, driver); err != nil {
+					t.Fatalf("NodeUnpublishVolume failed: %v", err)
+				}
+			},
+		},
+		{
+			// umount -f has no timeout upstream, so it can hang too. When it does, the
+			// RPC must still return an error rather than hold the lock, letting kubelet
+			// retry.
+			name: "fail: hanging forced unmount is abandoned instead of held",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				defer mockCtl.Finish()
+
+				mockMounter := driverMocks.NewMockMounter(mockCtl)
+				timeout := 50 * time.Millisecond
+				driver := &nodeService{
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: timeout},
+				}
+
+				mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(false, nil).AnyTimes()
+				mockMounter.EXPECT().Unmount(gomock.Eq(targetPath)).DoAndReturn(func(string) error {
+					<-make(chan struct{})
+					return nil
+				})
+				mockMounter.EXPECT().UnmountWithForce(gomock.Eq(targetPath), gomock.Any()).
+					DoAndReturn(func(string, time.Duration) error {
+						<-make(chan struct{})
+						return nil
+					})
+
+				if err := unpublish(t, driver); err == nil {
+					t.Fatal("NodeUnpublishVolume succeeded despite a forced unmount that never returned")
+				}
+
+				// The lock must be free so kubelet's retry is not rejected with Aborted.
+				rpcKey := fmt.Sprintf("%s-%s", "volumeId", targetPath)
+				if ok := driver.inFlight.Insert(rpcKey); !ok {
+					t.Fatal("in-flight lock still held after NodeUnpublishVolume returned")
+				}
+			},
+		},
+		{
+			// Feature disabled: behavior must be byte-for-byte the old blocking path.
+			name: "success: negative timeout uses plain blocking unmount",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				defer mockCtl.Finish()
+
+				mockMounter := driverMocks.NewMockMounter(mockCtl)
+				driver := &nodeService{
+					mounter:       mockMounter,
+					inFlight:      internal.NewInFlight(),
+					driverOptions: &DriverOptions{forcefulUnmountTimeout: -1},
+				}
+
+				mockMounter.EXPECT().IsLikelyNotMountPoint(gomock.Eq(targetPath)).Return(false, nil)
+				mockMounter.EXPECT().Unmount(gomock.Eq(targetPath)).Return(nil)
+
+				if err := unpublish(t, driver); err != nil {
+					t.Fatalf("NodeUnpublishVolume failed: %v", err)
 				}
 			},
 		},

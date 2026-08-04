@@ -1,3 +1,9 @@
+# v1.10.0
+* Bump Up Sidecar Image ([#16526b37](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/16526b37), [@Minzhe Guo](https://github.com/Minzhe Guo))
+* Go Dependency update ([#90e58a55](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/90e58a55), [@Minzhe Guo](https://github.com/Minzhe Guo))
+* Adjust log level of non-throttle API errors, add a WriteTimeout for writes ([#b7e0f6bd](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/b7e0f6bd), [@vardaro](https://github.com/vardaro))
+* Add support for FSx Lustre CSI Driver metrics ([#2f1b8e4d](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/2f1b8e4d), [@vardaro](https://github.com/vardaro))
+
 # v1.9.0
 * Bump up Chart Version ([#8ab53c91](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/8ab53c91), [@Trickybrain](https://github.com/Trickybrain))
 * Bump up kubeVersion ([#961b67cf](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/961b67cf), [@Trickybrain](https://github.com/Trickybrain))

@@ -1,3 +1,14 @@
+# v1.10.0
+* Use idempotency token + FS cache for createVolume ([#b0acfd53](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/b0acfd53), [@khoang98](https://github.com/khoang98))
+* Add Forceful unmount feature ([#d98bfede](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/d98bfede), [@MichaelKwok1998](https://github.com/MichaelKwok1998))
+* Applied Minimum Forceful Unmount Timeout Validation and Adjust Polling Period ([#f3ddd581](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/f3ddd581), [@MichaelKwok1998](https://github.com/MichaelKwok1998))
+* Add support for FSx Lustre CSI Driver metrics ([#2f1b8e4d](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/2f1b8e4d), [@vardaro](https://github.com/vardaro))
+* Adjust log level of non-throttle API errors, add a WriteTimeout for writes ([#b7e0f6bd](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/b7e0f6bd), [@vardaro](https://github.com/vardaro))
+* Disable volume-in-use pod informer in csi-resizer ([#ccdeab04](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/ccdeab04), [@siddharthsalot](https://github.com/siddharthsalot))
+* Add pre-e2e cleanup of stranded FSx Lustre filesystems ([#bd24e3df](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/bd24e3df), [@khoang98](https://github.com/khoang98))
+* Go Dependency update ([#90e58a55](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/90e58a55), [@MichaelKwok1998](https://github.com/MichaelKwok1998))
+* Bump Up Sidecar Image ([#16526b37](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/16526b37), [@MichaelKwok1998](https://github.com/MichaelKwok1998))
+
 # v1.9.0
 * Bump up Chart Version ([#8ab53c91](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/8ab53c91), [@Trickybrain](https://github.com/Trickybrain))
 * Bump up kubeVersion ([#961b67cf](https://github.com/kubernetes-sigs/aws-fsx-csi-driver/commit/961b67cf), [@Trickybrain](https://github.com/Trickybrain))
